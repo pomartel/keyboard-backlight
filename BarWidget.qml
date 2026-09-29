@@ -140,7 +140,6 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.levelIcon
-    foreground: "#ffffff"
     useActiveColor: false
     tooltipText: ""
     onPressed: function(b) {

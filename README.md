@@ -3,7 +3,7 @@
 An Omarchy shell plugin for ThinkPad keyboard backlights.
 
 - Hides the bar icon when the backlight is off.
-- Shows a white icon at Low or High brightness.
+- Uses the theme’s normal foreground color at Low or High brightness.
 - Left-click opens the Off / Low / High picker; right-click cycles levels.
 - Optional day/night scheduling continues while the icon is hidden.
 - Detects compatible Linux `*kbd_backlight*` LED devices automatically.
