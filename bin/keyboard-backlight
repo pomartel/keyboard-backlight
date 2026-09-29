@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+
+device=""
+for candidate in /sys/class/leds/*kbd_backlight*; do
+  if [[ -e $candidate ]]; then
+    device=${candidate##*/}
+    break
+  fi
+done
+
+if [[ -z $device ]]; then
+  echo "No keyboard backlight device found" >&2
+  exit 1
+fi
+
+current=$(brightnessctl -d "$device" get)
+maximum=$(brightnessctl -d "$device" max)
+
+case ${1:-status} in
+  status)
+    printf '%s %s %s\n' "$current" "$maximum" "$device"
+    ;;
+  set)
+    case ${2:-} in
+      off) target=0 ;;
+      low) target=1 ;;
+      high) target=$maximum ;;
+      *) echo "Usage: ${0##*/} [status|set {off|low|high}]" >&2; exit 2 ;;
+    esac
+    brightnessctl -d "$device" set "$target" >/dev/null
+    ;;
+  *)
+    echo "Usage: ${0##*/} [status|set {off|low|high}]" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "keyboard-backlight",
+  "name": "Keyboard Backlight",
+  "version": "1.0.0",
+  "author": "pomartel",
+  "license": "MIT",
+  "description": "Manual and scheduled keyboard lighting for ThinkPads without an automatic backlight sensor.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Keyboard Backlight",
+    "description": "Select off, low, or high and automate keyboard lighting on ThinkPads without an ambient-light mode.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "scheduleEnabled": false,
+      "nightStartHour": 20,
+      "dayStartHour": 7
+    },
+    "schema": [
+      {
+        "key": "scheduleEnabled",
+        "type": "boolean",
+        "label": "Automatic day/night schedule",
+        "defaultValue": false
+      },
+      {
+        "key": "nightStartHour",
+        "type": "integer",
+        "label": "Night starts at",
+        "min": 0,
+        "max": 23,
+        "step": 1,
+        "defaultValue": 20
+      },
+      {
+        "key": "dayStartHour",
+        "type": "integer",
+        "label": "Day starts at",
+        "min": 0,
+        "max": 23,
+        "step": 1,
+        "defaultValue": 7
+      }
+    ]
+  }
+}
