@@ -16,8 +16,11 @@ is hidden, or let the schedule turn it on.
 
 Locking the session or turning off all enabled displays forces the keyboard
 backlight off, even with scheduling disabled. The backlight stays off if session
-state cannot be read or the event subscription exits. There is no polling
-fallback or automatic retry. With multiple monitors, one awake display is
+state cannot be read. Losing the event subscription disables automatic lighting
+until reload, including when an older state read completes afterward. A failed
+brightness write stops automatic writes; use the manual brightness controls to
+retry once, or reload the plugin. There is no polling fallback or automatic
+retry. With multiple monitors, one awake display is
 sufficient while the session is unlocked.
 When unlocked with a display awake again, the current schedule is reapplied,
 including when the scheduled hour passed while locked. With scheduling disabled,
@@ -58,14 +61,21 @@ A one-shot timer targets the next configured day/night transition, then arms
 the following one. No periodic clock checks run. While the session is blocked,
 the timer is stopped; unlocking with a display awake reapplies the current
 period and arms the next transition. Changing the settings also recalculates
-the deadline. Equal day/night hours mean permanent night mode, without a timer.
+the deadline. System clock steps and changes to `/etc/localtime` or
+`/etc/timezone` also recalculate the deadline using kernel notifications, without
+periodic checks. A transition that is already due is applied before rearming.
+Equal day/night hours mean permanent night mode, without a timer.
 Session state is read once when subscribing, then only in response to events
 or just before an explicit lighting action.
 
 ## Tests
 
-Run `node --test tests/session.test.cjs` for session detection, guarded writes,
-and lock/wake scheduling regression tests. The tests do not change hardware state.
+Run `node --test tests/*.test.cjs` for session detection, guarded writes,
+scheduling, clock notifications, and process-race regression tests. QML
+integration tests use an isolated offscreen shell with mock hardware commands
+(and require a local Omarchy/Quickshell installation). Clock tests simulate a
+kernel cancellation and use temporary timezone files. The tests do not change
+hardware state or the system clock.
 
 ## Credits
 

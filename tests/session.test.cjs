@@ -54,22 +54,28 @@ test('helper blocks locked, blank, and unknown sessions, including queued writes
   }
 });
 
-function widget() {
+function widget(now) {
   const source = fs.readFileSync(path.join(plugin, 'BarWidget.qml'), 'utf8');
+  let currentTime = now;
+  class TestDate extends Date {
+    constructor(...args) { super(...(args.length ? args : currentTime ? [currentTime] : [])); }
+    static timeZoneUpdated() { ctx.zoneUpdates++; }
+  }
   const ctx = vm.createContext({ sessionBlocked: false, lastSchedulePeriod: 'night',
     pendingMode: '', refreshPending: false, statusProc: { running: false },
+    eventsFailed: false, actionFailed: false, zoneUpdates: 0, Date: TestDate,
+    console: { warn() {} },
     level: 1, scheduleEnabled: true, helper: '/helper',
     actionProc: { running: false, command: [] }, nightStartHour: 18, dayStartHour: 7,
+    refreshDelay: { running: false, stop() { this.running = false; }, start() { this.running = true; } },
     scheduleTimer: { running: false, interval: 0,
       stop() { this.running = false; }, start() { this.running = true; } } });
   ctx.root = ctx;
-  for (const name of ['refresh', 'setMode', 'flushMode', 'updateSession', 'schedulePeriod',
-    'applySchedule', 'nextScheduleDelay', 'armSchedule', 'scheduleChanged']) {
-    const match = source.match(new RegExp(`  function ${name}\\([^]*?\\n  }`));
-    assert.ok(match, name);
+  for (const match of source.matchAll(/^  function \w+\([^\n]*\) \{\n[^]*?\n  }/gm)) {
     vm.runInContext(match[0], ctx);
   }
-  ctx.schedulePeriod = () => 'night';
+  ctx.setTime = value => { currentTime = value; };
+  if (!now) ctx.schedulePeriod = () => 'night';
   return ctx;
 }
 
@@ -165,6 +171,87 @@ test('locking stops the timer; wake and settings changes recalculate the deadlin
   w.dayStartHour = w.nightStartHour;
   w.scheduleChanged();
   assert.equal(w.scheduleTimer.running, false);
+});
+
+test('a late active snapshot cannot recover a dead event subscription', () => {
+  const w = widget();
+  w.pendingMode = 'low';
+  w.actionProc.running = true;
+  w.failEvents();
+  assert.equal(w.eventsFailed, true);
+  assert.equal(w.pendingMode, 'off');
+  w.level = 0;
+  w.updateSession(false); // Already-running status process completes after failure.
+  w.handleEvent('change'); // Buffered event must not recover the stream either.
+  w.clockChanged();
+  assert.equal(w.sessionBlocked, true);
+  assert.equal(w.pendingMode, 'off');
+  assert.equal(w.scheduleTimer.running, false);
+  w.actionProc.running = false;
+  w.flushMode();
+  assert.equal(w.actionProc.command[2], 'off');
+});
+
+test('failed writes stop automatic commands until an explicit manual retry', () => {
+  const w = widget();
+  w.setMode('off');
+  w.pendingMode = 'low';
+  w.actionProc.running = false;
+  w.finishAction(1, 0);
+  assert.equal(w.actionFailed, true);
+  assert.equal(w.pendingMode, '');
+  assert.equal(w.refreshDelay.running, false);
+  assert.equal(w.scheduleTimer.running, false);
+  for (let i = 0; i < 10; i++) w.updateSession(true);
+  assert.equal(w.actionProc.running, false);
+  w.setMode('off', true);
+  assert.equal(w.actionFailed, false);
+  assert.equal(w.actionProc.running, true);
+});
+
+test('an active event at the deadline applies the transition before arming tomorrow', () => {
+  const w = widget('2026-10-21T18:00:00-04:00');
+  w.lastSchedulePeriod = 'day';
+  w.level = 0;
+  w.scheduleTimer.running = true;
+  w.updateSession(false);
+  assert.equal(w.actionProc.command[2], 'low');
+  assert.equal(w.lastSchedulePeriod, 'night');
+  assert.equal(w.scheduleTimer.interval, 13 * 3600000);
+});
+
+test('clock events rearm deadlines after forward and backward corrections', () => {
+  const w = widget('2026-10-21T17:00:00-04:00');
+  w.lastSchedulePeriod = 'day';
+  w.armSchedule();
+  assert.equal(w.scheduleTimer.interval, 3600000);
+  w.setTime('2026-10-21T17:55:00-04:00');
+  w.handleEvent('clock');
+  assert.equal(w.scheduleTimer.interval, 5 * 60000);
+  w.setTime('2026-10-21T16:00:00-04:00');
+  w.handleEvent('clock');
+  assert.equal(w.scheduleTimer.interval, 2 * 3600000);
+  w.setTime('2026-10-21T18:05:00-04:00');
+  w.handleEvent('clock');
+  assert.equal(w.actionProc.command[2], 'low');
+  assert.equal(w.zoneUpdates, 3);
+});
+
+test('timezone notifications refresh the local offset before recalculating', () => {
+  const w = widget('2026-10-21T17:00:00-04:00');
+  w.lastSchedulePeriod = 'day';
+  w.armSchedule();
+  const previous = process.env.TZ;
+  try {
+    process.env.TZ = 'America/Halifax'; // Same instant now falls at 18:00 local time.
+    w.handleEvent('clock');
+    assert.equal(w.zoneUpdates, 1);
+    assert.equal(w.lastSchedulePeriod, 'night');
+    assert.equal(w.actionProc.command[2], 'low');
+    assert.equal(w.scheduleTimer.interval, 13 * 3600000);
+  } finally {
+    process.env.TZ = previous;
+  }
 });
 
 test('native lock listener ignores authentication chatter and unrelated logs', () => {

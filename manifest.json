@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "keyboard-backlight",
   "name": "Keyboard Backlight",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "pomartel",
   "license": "MIT",
   "description": "Manual and scheduled keyboard lighting for ThinkPads without an automatic backlight sensor.",

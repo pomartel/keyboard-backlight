@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Wait for Wayland output-power, Omarchy lock journal, and keyboard LED events.
-// No timer, sleep loop, or periodic state queries.
+// No periodic timers, sleep loops, or periodic state queries.
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -9,7 +9,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
+#include <sys/timerfd.h>
 #include <systemd/sd-journal.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
 
@@ -40,6 +43,68 @@ static bool manager_removed;
 static void changed(void) {
     puts("change");
     fflush(stdout);
+}
+
+static void clock_changed(void) {
+    puts("clock");
+    fflush(stdout);
+}
+
+static int arm_clock_watch(int fd) {
+    struct itimerspec timer = {0};
+    if (clock_gettime(CLOCK_REALTIME, &timer.it_value) < 0) return -1;
+    // This one-shot stays dormant for a century. The kernel cancels it on a
+    // clock step, which wakes poll immediately without periodic comparisons.
+    timer.it_value.tv_sec += (time_t)100 * 366 * 86400;
+    return timerfd_settime(fd, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &timer, NULL);
+}
+
+static int clock_events(int fd) {
+    uint64_t expirations;
+    ssize_t count = read(fd, &expirations, sizeof(expirations));
+    if (count == -1 && (errno == EAGAIN || errno == EINTR)) return 0;
+    if (count != sizeof(expirations) && !(count == -1 && errno == ECANCELED)) return -1;
+    if (arm_clock_watch(fd) < 0) return -1;
+    clock_changed();
+    return 0;
+}
+
+static int timezone_file_watch = -1;
+
+static int watch_timezone(int fd, const char *directory, const char *localtime) {
+    if (inotify_add_watch(fd, directory, IN_CREATE | IN_MOVED_TO | IN_MOVED_FROM |
+                          IN_DELETE | IN_CLOSE_WRITE | IN_ATTRIB) < 0) return -1;
+    // Also notice writes through the symlink and replacement of its target.
+    // A missing /etc/localtime is valid (UTC); the directory watch catches creation.
+    int replacement = inotify_add_watch(fd, localtime, IN_CLOSE_WRITE | IN_ATTRIB |
+                                       IN_MOVE_SELF | IN_DELETE_SELF);
+    if (replacement < 0 && errno != ENOENT) return -1;
+    if (timezone_file_watch >= 0 && timezone_file_watch != replacement)
+        inotify_rm_watch(fd, timezone_file_watch);
+    timezone_file_watch = replacement;
+    return 0;
+}
+
+static int timezone_events(int fd, const char *directory, const char *localtime) {
+    char buffer[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    bool changed_zone = false;
+    ssize_t count;
+    while ((count = read(fd, buffer, sizeof(buffer))) > 0) {
+        for (char *entry = buffer; entry < buffer + count;) {
+            struct inotify_event *event = (struct inotify_event *)entry;
+            if (event->mask & IN_Q_OVERFLOW) changed_zone = true;
+            else if (!(event->mask & IN_IGNORED) &&
+                     (!event->len || !strcmp(event->name, "localtime") || !strcmp(event->name, "timezone")))
+                changed_zone = true;
+            entry += sizeof(*event) + event->len;
+        }
+    }
+    if (count < 0 && errno != EAGAIN && errno != EINTR) return -1;
+    if (changed_zone) {
+        if (watch_timezone(fd, directory, localtime) < 0) return -1;
+        clock_changed();
+    }
+    return 0;
 }
 
 static void power_mode(void *data, struct wl_proxy *power, uint32_t mode) {
@@ -140,12 +205,22 @@ int main(int argc, char **argv) {
     }
 
     int led = argc == 2 ? open(argv[1], O_RDONLY | O_CLOEXEC) : -1;
+    int clock_fd = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC);
+    int timezone_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (clock_fd < 0 || timezone_fd < 0 || arm_clock_watch(clock_fd) < 0 ||
+        watch_timezone(timezone_fd, "/etc", "/etc/localtime") < 0) {
+        fputs("Cannot subscribe to system clock changes\n", stderr);
+        return EXIT_FAILURE;
+    }
     char brightness[32];
     if (led >= 0) (void)pread(led, brightness, sizeof(brightness), 0);
     struct pollfd fds[] = {
         {wl_display_get_fd(display), POLLIN, 0},
         {sd_journal_get_fd(journal), sd_journal_get_events(journal), 0},
-        {led, POLLPRI, 0}};
+        {led, POLLPRI, 0},
+        {clock_fd, POLLIN, 0},
+        {timezone_fd, POLLIN, 0}};
+    clock_changed(); // Refresh QML's timezone cache before the first deadline.
     changed(); // Initial snapshot, after all event subscriptions are in place.
 
     for (;;) {
@@ -157,7 +232,7 @@ int main(int argc, char **argv) {
             if (errno != EAGAIN) { wl_display_cancel_read(display); return EXIT_FAILURE; }
             fds[0].events |= POLLOUT;
         }
-        int result = poll(fds, 3, -1);
+        int result = poll(fds, 5, -1);
         if (result < 0) {
             wl_display_cancel_read(display);
             if (errno == EINTR) continue;
@@ -186,5 +261,7 @@ int main(int argc, char **argv) {
             close(led);
             fds[2].fd = led = -1;
         }
+        if (fds[3].revents && clock_events(clock_fd) < 0) return EXIT_FAILURE;
+        if (fds[4].revents && timezone_events(timezone_fd, "/etc", "/etc/localtime") < 0) return EXIT_FAILURE;
     }
 }

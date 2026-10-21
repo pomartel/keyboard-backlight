@@ -15,6 +15,8 @@ BarWidget {
   property bool sessionBlocked: true
   property string pendingMode: ""
   property bool refreshPending: false
+  property bool eventsFailed: false
+  property bool actionFailed: false
   readonly property string levelIcon: level <= 0 ? "󰹐" : (level >= maximum ? "󰛨" : "󰌶")
   readonly property bool scheduleEnabled: setting("scheduleEnabled", false) === true
   readonly property int nightStartHour: Number(setting("nightStartHour", 20))
@@ -30,34 +32,78 @@ BarWidget {
     }
   }
 
-  function setMode(mode) {
-    pendingMode = sessionBlocked ? "off" : mode
+  function setMode(mode, manual) {
+    if (manual) actionFailed = false
+    if (actionFailed) return
+    pendingMode = sessionBlocked || eventsFailed ? "off" : mode
     flushMode()
   }
 
   function flushMode() {
+    if (actionFailed) { pendingMode = ""; return }
     if (actionProc.running || pendingMode === "") return
-    actionProc.command = [root.helper, "set", sessionBlocked ? "off" : pendingMode]
+    actionProc.command = [root.helper, "set", sessionBlocked || eventsFailed ? "off" : pendingMode]
     pendingMode = ""
     actionProc.running = true
   }
 
   function updateSession(blocked) {
+    blocked = blocked || eventsFailed
     var wasBlocked = sessionBlocked
     sessionBlocked = blocked
     if (blocked) {
       lastSchedulePeriod = ""
       if (!wasBlocked || level > 0 || pendingMode !== "") setMode("off")
-    } else if (wasBlocked) {
-      applySchedule(true)
+    } else {
+      // An event at the deadline must apply an overdue transition before
+      // stopping the old timer and arming tomorrow's deadline.
+      applySchedule(wasBlocked)
     }
     armSchedule()
   }
 
   function cycle() {
-    if (level <= 0) setMode("low")
-    else if (level >= maximum) setMode("off")
-    else setMode("high")
+    if (level <= 0) setMode("low", true)
+    else if (level >= maximum) setMode("off", true)
+    else setMode("high", true)
+  }
+
+  function failEvents() {
+    if (eventsFailed) return
+    eventsFailed = true
+    sessionBlocked = true
+    refreshPending = false
+    lastSchedulePeriod = ""
+    scheduleTimer.stop()
+    pendingMode = ""
+    setMode("off")
+    console.warn("Keyboard backlight event subscription stopped; automatic lighting disabled until reload")
+  }
+
+  function finishAction(exitCode, exitStatus) {
+    if (exitCode !== 0 || exitStatus !== 0) {
+      actionFailed = true
+      pendingMode = ""
+      refreshDelay.stop()
+      scheduleTimer.stop()
+      console.warn("Keyboard backlight write failed; automatic writes disabled until manual retry or reload")
+      return
+    }
+    flushMode()
+    refreshDelay.start()
+  }
+
+  function clockChanged() {
+    Date.timeZoneUpdated()
+    if (eventsFailed) return
+    applySchedule(false)
+    armSchedule()
+  }
+
+  function handleEvent(line) {
+    if (eventsFailed) return
+    if (line === "clock") clockChanged()
+    else if (line === "change") refresh()
   }
 
   function schedulePeriod() {
@@ -70,7 +116,7 @@ BarWidget {
   }
 
   function applySchedule(force) {
-    if (sessionBlocked) {
+    if (sessionBlocked || eventsFailed) {
       lastSchedulePeriod = ""
       return
     }
@@ -104,7 +150,7 @@ BarWidget {
 
   function armSchedule() {
     scheduleTimer.stop()
-    if (sessionBlocked) return
+    if (sessionBlocked || eventsFailed || actionFailed) return
     var delay = nextScheduleDelay(new Date())
     if (delay <= 0) return
     scheduleTimer.interval = delay
@@ -183,13 +229,9 @@ BarWidget {
     command: [Qt.resolvedUrl("bin/watch-session").toString().replace(/^file:\/\//, "")]
     running: true
     stdout: SplitParser {
-      onRead: function(line) { if (line === "change") root.refresh() }
+      onRead: function(line) { root.handleEvent(line) }
     }
-    onExited: {
-      root.updateSession(true)
-      root.setMode("off")
-      console.warn("Keyboard backlight event subscription stopped; keeping backlight off")
-    }
+    onExited: root.failEvents()
   }
 
   Process {
@@ -215,10 +257,7 @@ BarWidget {
 
   Process {
     id: actionProc
-    onExited: {
-      root.flushMode()
-      refreshDelay.start()
-    }
+    onExited: function(exitCode, exitStatus) { root.finishAction(exitCode, exitStatus) }
   }
   Timer { id: refreshDelay; interval: 150; repeat: false; onTriggered: root.refresh() }
 

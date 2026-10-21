@@ -21,7 +21,7 @@ Panel {
   function select(delta) { selectedIndex = (selectedIndex + delta + modes.length) % modes.length }
   function activate(index) {
     selectedIndex = index
-    if (hostWidget) hostWidget.setMode(modes[index].mode)
+    if (hostWidget) hostWidget.setMode(modes[index].mode, true)
   }
   function changeNightHour(delta) {
     if (hostWidget) hostWidget.setScheduleHour("nightStartHour", hostWidget.nightStartHour + delta)
