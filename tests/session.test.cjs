@@ -45,7 +45,7 @@ test('helper blocks locked, blank, and unknown sessions, including queued writes
       const run = (...args) => execFileSync('bash', [helper, ...args], { env, encoding: 'utf8' });
       assert.equal(run('status').trim(), `2 2 test::kbd_backlight ${c.blocked}`);
       for (const [mode, target] of [['low', 1], ['high', 2], ['off', 0]]) {
-        run('set', mode);
+        assert.equal(run('set', mode).trim(), c.blocked && target > 0 ? 'inhibited' : '');
         assert.equal(fs.readFileSync(env.TEST_WRITE, 'utf8').trim(), String(c.blocked ? 0 : target));
       }
     }
@@ -64,6 +64,7 @@ function widget(now) {
   const ctx = vm.createContext({ sessionBlocked: false, lastSchedulePeriod: 'night',
     pendingMode: '', refreshPending: false, statusProc: { running: false },
     eventsFailed: false, actionFailed: false, zoneUpdates: 0, Date: TestDate,
+    pendingRetry: false, guardRecoveryAttempted: false, outputEventsBlocked: false, actionResult: '',
     console: { warn() {} },
     level: 1, scheduleEnabled: true, helper: '/helper',
     actionProc: { running: false, command: [] }, nightStartHour: 18, dayStartHour: 7,
@@ -194,6 +195,7 @@ test('a late active snapshot cannot recover a dead event subscription', () => {
 
 test('failed writes stop automatic commands until an explicit manual retry', () => {
   const w = widget();
+  w.sessionBlocked = true;
   w.setMode('off');
   w.pendingMode = 'low';
   w.actionProc.running = false;
@@ -207,6 +209,67 @@ test('failed writes stop automatic commands until an explicit manual retry', () 
   w.setMode('off', true);
   assert.equal(w.actionFailed, false);
   assert.equal(w.actionProc.running, true);
+});
+
+test('a fresh lock gets one off attempt after an earlier failed write', () => {
+  const w = widget();
+  w.setMode('low');
+  w.actionProc.running = false;
+  w.finishAction(1, 0);
+  assert.equal(w.actionFailed, true);
+  w.updateSession(true);
+  assert.equal(w.actionProc.running, true);
+  assert.equal(w.actionProc.command[2], 'off');
+  w.actionProc.running = false;
+  w.finishAction(1, 0);
+  for (let i = 0; i < 10; i++) w.updateSession(true);
+  assert.equal(w.actionProc.running, false);
+});
+
+test('a lock queued during a failed write survives duplicate state snapshots', () => {
+  const w = widget();
+  w.setMode('low');
+  w.updateSession(true);
+  w.updateSession(true);
+  assert.equal(w.pendingRetry, true);
+  w.actionProc.running = false;
+  w.finishAction(1, 0);
+  assert.equal(w.actionProc.running, true);
+  assert.equal(w.actionProc.command[2], 'off');
+});
+
+test('inhibited lighting invalidates the applied period and settles only once', () => {
+  const w = widget();
+  w.actionResult = 'inhibited';
+  w.finishAction(0, 0);
+  assert.equal(w.lastSchedulePeriod, '');
+  assert.equal(w.sessionBlocked, true);
+  assert.equal(w.refreshDelay.running, true);
+  w.refreshDelay.running = false;
+  w.updateSession(false);
+  assert.equal(w.actionProc.command[2], 'low');
+  w.actionProc.running = false;
+  w.actionResult = 'inhibited';
+  w.finishAction(0, 0);
+  assert.equal(w.refreshDelay.running, false);
+  assert.equal(w.actionFailed, false);
+  w.handleEvent('change'); // A real event allows a new, bounded settlement.
+  assert.equal(w.guardRecoveryAttempted, false);
+});
+
+test('retiring an output inhibits lighting until its registry removal, then recovers', () => {
+  const w = widget();
+  w.handleEvent('outputs-blocked');
+  assert.equal(w.eventsFailed, false);
+  assert.equal(w.outputEventsBlocked, true);
+  w.updateSession(false); // An older active snapshot cannot defeat the inhibit.
+  assert.equal(w.sessionBlocked, true);
+  assert.equal(w.actionProc.command[2], 'off');
+  w.actionProc.running = false;
+  w.handleEvent('outputs-ready');
+  w.updateSession(false);
+  assert.equal(w.sessionBlocked, false);
+  assert.equal(w.actionProc.command[2], 'low');
 });
 
 test('an active event at the deadline applies the transition before arming tomorrow', () => {

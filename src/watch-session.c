@@ -50,6 +50,18 @@ static void clock_changed(void) {
     fflush(stdout);
 }
 
+static void output_availability(void) {
+    for (struct output *output = outputs; output; output = output->next) {
+        if (output->failed) {
+            puts("outputs-blocked");
+            fflush(stdout);
+            return;
+        }
+    }
+    puts("outputs-ready");
+    fflush(stdout);
+}
+
 static int arm_clock_watch(int fd) {
     struct itimerspec timer = {0};
     if (clock_gettime(CLOCK_REALTIME, &timer.it_value) < 0) return -1;
@@ -117,14 +129,17 @@ static void power_failed(void *data, struct wl_proxy *power) {
     wl_proxy_marshal_flags(power, 1, NULL, 1, WL_MARSHAL_FLAG_DESTROY);
     output->power = NULL;
     output->failed = true;
-    changed();
+    // failed can precede global_remove during a normal unplug. Keep the
+    // journal, clock, and other outputs alive; the keyboard stays off until
+    // the defunct output is removed from the registry.
+    output_availability();
 }
 
 static void (*power_listener[])(void) = {
     (void (*)(void))power_mode, (void (*)(void))power_failed};
 
 static void watch_output(struct output *output) {
-    if (!manager || output->power) return;
+    if (!manager || output->power || output->failed) return;
     output->power = wl_proxy_marshal_flags(manager, 0, &power_interface, 1, 0, NULL, output->output);
     wl_proxy_add_listener(output->power, power_listener, output);
 }
@@ -158,6 +173,7 @@ static void global_remove(void *data, struct wl_registry *registry, uint32_t nam
         wl_output_destroy(output->output);
         *entry = output->next;
         free(output);
+        output_availability();
         break;
     }
     changed();
@@ -243,12 +259,6 @@ int main(int argc, char **argv) {
         } else wl_display_cancel_read(display);
         if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) return EXIT_FAILURE;
         if (wl_display_dispatch_pending(display) < 0 || manager_removed) return EXIT_FAILURE;
-        for (struct output *output = outputs; output; output = output->next) {
-            if (output->failed) {
-                fputs("Lost output-power event subscription\n", stderr);
-                return EXIT_FAILURE;
-            }
-        }
         if (fds[1].revents) {
             if (sd_journal_process(journal) < 0) return EXIT_FAILURE;
             journal_events(journal);

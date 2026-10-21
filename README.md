@@ -18,13 +18,25 @@ Locking the session or turning off all enabled displays forces the keyboard
 backlight off, even with scheduling disabled. The backlight stays off if session
 state cannot be read. Losing the event subscription disables automatic lighting
 until reload, including when an older state read completes afterward. A failed
-brightness write stops automatic writes; use the manual brightness controls to
-retry once, or reload the plugin. There is no polling fallback or automatic
-retry. With multiple monitors, one awake display is
+brightness write stops repeated automatic writes in the same session state.
+A new transition into a locked or blank session gets one fresh off attempt,
+including when it arrives during an older failed command. Manual brightness
+controls also permit one retry. There is no polling fallback or repeated
+automatic retry. With multiple monitors, one awake display is
 sufficient while the session is unlocked.
 When unlocked with a display awake again, the current schedule is reapplied,
 including when the scheduled hour passed while locked. With scheduling disabled,
 the backlight remains off until you turn it on manually.
+
+A lighting request prevented by the session guard is reported separately from a
+successful lighting change. The current schedule is marked pending and the
+session is reevaluated once after the command; repeated guard failures wait
+for a real event or manual action instead of forming a retry loop.
+
+Unplugging a display keeps the other event subscriptions alive. If its power
+object becomes invalid before its registry removal arrives, lighting is
+temporarily inhibited until that output is removed, then the schedule resumes
+according to the remaining displays.
 
 ## Install
 
@@ -76,6 +88,8 @@ integration tests use an isolated offscreen shell with mock hardware commands
 (and require a local Omarchy/Quickshell installation). Clock tests simulate a
 kernel cancellation and use temporary timezone files. The tests do not change
 hardware state or the system clock.
+The hotplug test uses a simulated Wayland compositor to cover both output
+removal orders, remaining-output notifications, and reconnecting a display.
 
 ## Credits
 

@@ -17,6 +17,10 @@ BarWidget {
   property bool refreshPending: false
   property bool eventsFailed: false
   property bool actionFailed: false
+  property bool pendingRetry: false
+  property bool guardRecoveryAttempted: false
+  property bool outputEventsBlocked: false
+  property string actionResult: ""
   readonly property string levelIcon: level <= 0 ? "󰹐" : (level >= maximum ? "󰛨" : "󰌶")
   readonly property bool scheduleEnabled: setting("scheduleEnabled", false) === true
   readonly property int nightStartHour: Number(setting("nightStartHour", 20))
@@ -32,28 +36,37 @@ BarWidget {
     }
   }
 
-  function setMode(mode, manual) {
-    if (manual) actionFailed = false
+  function setMode(mode, allowRetry) {
+    if (allowRetry) {
+      actionFailed = false
+      guardRecoveryAttempted = false
+    }
     if (actionFailed) return
-    pendingMode = sessionBlocked || eventsFailed ? "off" : mode
+    var target = sessionBlocked || eventsFailed || outputEventsBlocked ? "off" : mode
+    pendingRetry = allowRetry === true || (pendingRetry && pendingMode === target)
+    pendingMode = target
     flushMode()
   }
 
   function flushMode() {
-    if (actionFailed) { pendingMode = ""; return }
+    if (actionFailed && !pendingRetry) { pendingMode = ""; return }
     if (actionProc.running || pendingMode === "") return
-    actionProc.command = [root.helper, "set", sessionBlocked || eventsFailed ? "off" : pendingMode]
+    if (pendingRetry) actionFailed = false
+    actionResult = ""
+    actionProc.command = [root.helper, "set", sessionBlocked || eventsFailed || outputEventsBlocked ? "off" : pendingMode]
     pendingMode = ""
+    pendingRetry = false
     actionProc.running = true
   }
 
   function updateSession(blocked) {
-    blocked = blocked || eventsFailed
+    blocked = blocked || eventsFailed || outputEventsBlocked
     var wasBlocked = sessionBlocked
     sessionBlocked = blocked
     if (blocked) {
       lastSchedulePeriod = ""
-      if (!wasBlocked || level > 0 || pendingMode !== "") setMode("off")
+      if (!wasBlocked) setMode("off", true)
+      else if (level > 0 || pendingMode !== "") setMode("off")
     } else {
       // An event at the deadline must apply an overdue transition before
       // stopping the old timer and arming tomorrow's deadline.
@@ -76,17 +89,37 @@ BarWidget {
     lastSchedulePeriod = ""
     scheduleTimer.stop()
     pendingMode = ""
-    setMode("off")
+    pendingRetry = false
+    setMode("off", true)
     console.warn("Keyboard backlight event subscription stopped; automatic lighting disabled until reload")
   }
 
   function finishAction(exitCode, exitStatus) {
     if (exitCode !== 0 || exitStatus !== 0) {
       actionFailed = true
-      pendingMode = ""
       refreshDelay.stop()
       scheduleTimer.stop()
-      console.warn("Keyboard backlight write failed; automatic writes disabled until manual retry or reload")
+      // A newer explicit request (including a fresh lock) gets its own one
+      // attempt, even when the older in-flight command failed.
+      if (pendingRetry) flushMode()
+      else {
+        pendingMode = ""
+        console.warn("Keyboard backlight write failed; waiting for a new lock, manual retry, or reload")
+      }
+      return
+    }
+    if (actionResult === "inhibited") {
+      lastSchedulePeriod = ""
+      sessionBlocked = true
+      scheduleTimer.stop()
+      // The guard already switched the hardware off. Discard stale requests,
+      // then settle once; repeated guard failures must not form a retry loop.
+      pendingMode = ""
+      pendingRetry = false
+      if (!guardRecoveryAttempted && !eventsFailed) {
+        guardRecoveryAttempted = true
+        refreshDelay.start()
+      } else refreshDelay.stop()
       return
     }
     flushMode()
@@ -102,8 +135,20 @@ BarWidget {
 
   function handleEvent(line) {
     if (eventsFailed) return
-    if (line === "clock") clockChanged()
-    else if (line === "change") refresh()
+    if (line === "outputs-blocked") {
+      outputEventsBlocked = true
+      updateSession(true)
+    } else if (line === "outputs-ready") {
+      outputEventsBlocked = false
+      guardRecoveryAttempted = false
+      refresh()
+    } else if (line === "clock") {
+      guardRecoveryAttempted = false
+      clockChanged()
+    } else if (line === "change") {
+      guardRecoveryAttempted = false
+      refresh()
+    }
   }
 
   function schedulePeriod() {
@@ -116,7 +161,7 @@ BarWidget {
   }
 
   function applySchedule(force) {
-    if (sessionBlocked || eventsFailed) {
+    if (sessionBlocked || eventsFailed || outputEventsBlocked) {
       lastSchedulePeriod = ""
       return
     }
@@ -150,7 +195,7 @@ BarWidget {
 
   function armSchedule() {
     scheduleTimer.stop()
-    if (sessionBlocked || eventsFailed || actionFailed) return
+    if (sessionBlocked || eventsFailed || outputEventsBlocked || actionFailed) return
     var delay = nextScheduleDelay(new Date())
     if (delay <= 0) return
     scheduleTimer.interval = delay
@@ -158,6 +203,7 @@ BarWidget {
   }
 
   function scheduleChanged() {
+    guardRecoveryAttempted = false
     lastSchedulePeriod = ""
     applySchedule(true)
     armSchedule()
@@ -219,6 +265,7 @@ BarWidget {
     id: scheduleTimer
     repeat: false
     onTriggered: {
+      root.guardRecoveryAttempted = false
       root.applySchedule(false)
       root.armSchedule()
     }
@@ -257,6 +304,10 @@ BarWidget {
 
   Process {
     id: actionProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.actionResult = text.trim()
+    }
     onExited: function(exitCode, exitStatus) { root.finishAction(exitCode, exitStatus) }
   }
   Timer { id: refreshDelay; interval: 150; repeat: false; onTriggered: root.refresh() }

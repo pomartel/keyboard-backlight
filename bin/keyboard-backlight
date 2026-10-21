@@ -46,8 +46,13 @@ case ${1:-status} in
         ;;
     esac
     # Recheck at the write, too: a queued schedule action may outlive a lock.
-    if ((target > 0)) && session_blocked; then target=0; fi
+    inhibited=false
+    if ((target > 0)) && session_blocked; then
+      target=0
+      inhibited=true
+    fi
     brightnessctl -d "$device" set "$target" >/dev/null
+    if $inhibited; then printf 'inhibited\n'; fi
     ;;
   *)
     echo "Usage: ${0##*/} [status|set {off|low|high}]" >&2
