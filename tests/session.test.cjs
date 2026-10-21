@@ -7,6 +7,7 @@ const vm = require('node:vm');
 const { execFileSync } = require('node:child_process');
 
 const plugin = path.resolve(__dirname, '..');
+process.env.TZ = 'America/Toronto';
 
 test('helper blocks locked, blank, and unknown sessions, including queued writes', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keyboard-backlight-'));
@@ -58,9 +59,12 @@ function widget() {
   const ctx = vm.createContext({ sessionBlocked: false, lastSchedulePeriod: 'night',
     pendingMode: '', refreshPending: false, statusProc: { running: false },
     level: 1, scheduleEnabled: true, helper: '/helper',
-    actionProc: { running: false, command: [] }, nightStartHour: 18, dayStartHour: 7 });
+    actionProc: { running: false, command: [] }, nightStartHour: 18, dayStartHour: 7,
+    scheduleTimer: { running: false, interval: 0,
+      stop() { this.running = false; }, start() { this.running = true; } } });
   ctx.root = ctx;
-  for (const name of ['refresh', 'setMode', 'flushMode', 'updateSession', 'schedulePeriod', 'applySchedule']) {
+  for (const name of ['refresh', 'setMode', 'flushMode', 'updateSession', 'schedulePeriod',
+    'applySchedule', 'nextScheduleDelay', 'armSchedule', 'scheduleChanged']) {
     const match = source.match(new RegExp(`  function ${name}\\([^]*?\\n  }`));
     assert.ok(match, name);
     vm.runInContext(match[0], ctx);
@@ -120,6 +124,47 @@ test('an event arriving during a state read queues another snapshot', () => {
   w.refresh();
   assert.equal(w.refreshPending, false);
   assert.equal(w.statusProc.running, true);
+});
+
+test('schedule targets the next boundary, including midnight and exact transition times', () => {
+  const w = widget();
+  const delay = time => w.nextScheduleDelay(new Date(time));
+  assert.equal(delay('2026-10-21T17:59:59.750-04:00'), 250);
+  assert.equal(delay('2026-10-21T18:00:00-04:00'), 13 * 3600000);
+  assert.equal(delay('2026-10-21T07:00:00-04:00'), 11 * 3600000);
+  assert.equal(delay('2026-10-21T23:00:00-04:00'), 8 * 3600000);
+  w.nightStartHour = 0;
+  assert.equal(delay('2026-10-21T23:59:59.900-04:00'), 100);
+});
+
+test('next-day deadlines use local calendar dates across daylight saving changes', () => {
+  const w = widget();
+  assert.equal(w.nextScheduleDelay(new Date('2026-03-07T20:00:00-05:00')), 10 * 3600000);
+  assert.equal(w.nextScheduleDelay(new Date('2026-10-31T20:00:00-04:00')), 12 * 3600000);
+});
+
+test('locking stops the timer; wake and settings changes recalculate the deadline', () => {
+  const w = widget();
+  w.armSchedule();
+  assert.equal(w.scheduleTimer.running, true);
+  w.updateSession(true);
+  assert.equal(w.scheduleTimer.running, false);
+  w.actionProc.running = false;
+  w.updateSession(false);
+  assert.equal(w.scheduleTimer.running, true);
+  const before = w.scheduleTimer.interval;
+  w.dayStartHour = 8;
+  w.nightStartHour = 19;
+  w.scheduleChanged();
+  assert.equal(w.scheduleTimer.running, true);
+  assert.notEqual(w.scheduleTimer.interval, before);
+  w.scheduleEnabled = false;
+  w.scheduleChanged();
+  assert.equal(w.scheduleTimer.running, false);
+  w.scheduleEnabled = true;
+  w.dayStartHour = w.nightStartHour;
+  w.scheduleChanged();
+  assert.equal(w.scheduleTimer.running, false);
 });
 
 test('native lock listener ignores authentication chatter and unrelated logs', () => {

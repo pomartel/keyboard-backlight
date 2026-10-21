@@ -54,9 +54,13 @@ omarchy bar set keyboard-backlight nightStartHour 18 --json
 omarchy bar set keyboard-backlight dayStartHour 7 --json
 ```
 
-The schedule still checks the clock every 30 seconds; this does not query the
-session or displays. Session state is read once when subscribing, then only in
-response to events or just before an explicit lighting action.
+A one-shot timer targets the next configured day/night transition, then arms
+the following one. No periodic clock checks run. While the session is blocked,
+the timer is stopped; unlocking with a display awake reapplies the current
+period and arms the next transition. Changing the settings also recalculates
+the deadline. Equal day/night hours mean permanent night mode, without a timer.
+Session state is read once when subscribing, then only in response to events
+or just before an explicit lighting action.
 
 ## Tests
 

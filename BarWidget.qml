@@ -51,6 +51,7 @@ BarWidget {
     } else if (wasBlocked) {
       applySchedule(true)
     }
+    armSchedule()
   }
 
   function cycle() {
@@ -83,6 +84,39 @@ BarWidget {
     setMode(period === "night" ? "low" : "off")
   }
 
+  function nextScheduleDelay(now) {
+    // Equal hours mean permanent night mode, so there is no next transition.
+    if (!scheduleEnabled || nightStartHour === dayStartHour) return 0
+    var next = Infinity
+    var hours = [nightStartHour, dayStartHour]
+    for (var i = 0; i < hours.length; i++) {
+      var boundary = new Date(now.getTime())
+      boundary.setHours(hours[i], 0, 0, 0)
+      if (boundary.getTime() <= now.getTime()) {
+        boundary = new Date(now.getTime())
+        boundary.setDate(boundary.getDate() + 1)
+        boundary.setHours(hours[i], 0, 0, 0)
+      }
+      next = Math.min(next, boundary.getTime() - now.getTime())
+    }
+    return next
+  }
+
+  function armSchedule() {
+    scheduleTimer.stop()
+    if (sessionBlocked) return
+    var delay = nextScheduleDelay(new Date())
+    if (delay <= 0) return
+    scheduleTimer.interval = delay
+    scheduleTimer.start()
+  }
+
+  function scheduleChanged() {
+    lastSchedulePeriod = ""
+    applySchedule(true)
+    armSchedule()
+  }
+
   function persistSettings(values) {
     var entry = { id: root.moduleName }
     for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
@@ -94,8 +128,6 @@ BarWidget {
 
   function setScheduleEnabled(value) {
     persistSettings({ scheduleEnabled: value })
-    lastSchedulePeriod = ""
-    if (value) Qt.callLater(function() { root.applySchedule(true) })
   }
 
   function setScheduleHour(key, value) {
@@ -103,8 +135,6 @@ BarWidget {
     var update = {}
     update[key] = normalized
     persistSettings(update)
-    lastSchedulePeriod = ""
-    if (scheduleEnabled) Qt.callLater(function() { root.applySchedule(true) })
   }
 
   function open() { if (panelLoader.item) panelLoader.item.open() }
@@ -126,10 +156,10 @@ BarWidget {
   implicitWidth: level > 0 ? button.implicitWidth : 0
   implicitHeight: level > 0 ? button.implicitHeight : 0
   onBarChanged: injectPanel()
-  onScheduleEnabledChanged: if (!scheduleEnabled) lastSchedulePeriod = ""
-  Component.onCompleted: {
-    scheduleDelay.start()
-  }
+  onScheduleEnabledChanged: Qt.callLater(root.scheduleChanged)
+  onNightStartHourChanged: Qt.callLater(root.scheduleChanged)
+  onDayStartHourChanged: Qt.callLater(root.scheduleChanged)
+  Component.onCompleted: Qt.callLater(root.scheduleChanged)
 
   Loader {
     id: panelLoader
@@ -139,8 +169,14 @@ BarWidget {
     onLoaded: { root.injectPanel(); Qt.callLater(root.injectPanel) }
   }
 
-  Timer { interval: 30000; running: true; repeat: true; onTriggered: root.applySchedule(false) }
-  Timer { id: scheduleDelay; interval: 1000; repeat: false; onTriggered: root.applySchedule(true) }
+  Timer {
+    id: scheduleTimer
+    repeat: false
+    onTriggered: {
+      root.applySchedule(false)
+      root.armSchedule()
+    }
+  }
 
   Process {
     id: eventProc
