@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "Schedule.js" as Schedule
 
 BarWidget {
   id: root
@@ -13,14 +14,14 @@ BarWidget {
   property string deviceName: ""
   property string lastSchedulePeriod: ""
   property bool sessionBlocked: true
-  property string pendingMode: ""
+  property var pendingAction: null
   property bool refreshPending: false
   property bool eventsFailed: false
   property bool actionFailed: false
-  property bool pendingRetry: false
   property bool guardRecoveryAttempted: false
   property bool outputEventsBlocked: false
-  property string actionResult: ""
+  readonly property bool eventsBlocked: eventsFailed || outputEventsBlocked
+  readonly property bool lightingBlocked: sessionBlocked || eventsBlocked
   readonly property string levelIcon: level <= 0 ? "󰹐" : (level >= maximum ? "󰛨" : "󰌶")
   readonly property bool scheduleEnabled: setting("scheduleEnabled", false) === true
   readonly property int nightStartHour: Number(setting("nightStartHour", 20))
@@ -42,31 +43,32 @@ BarWidget {
       guardRecoveryAttempted = false
     }
     if (actionFailed) return
-    var target = sessionBlocked || eventsFailed || outputEventsBlocked ? "off" : mode
-    pendingRetry = allowRetry === true || (pendingRetry && pendingMode === target)
-    pendingMode = target
+    var target = lightingBlocked ? "off" : mode
+    var retry = allowRetry === true
+    if (pendingAction && pendingAction.mode === target) retry = retry || pendingAction.retry
+    pendingAction = { mode: target, retry: retry }
     flushMode()
   }
 
   function flushMode() {
-    if (actionFailed && !pendingRetry) { pendingMode = ""; return }
-    if (actionProc.running || pendingMode === "") return
-    if (pendingRetry) actionFailed = false
-    actionResult = ""
-    actionProc.command = [root.helper, "set", sessionBlocked || eventsFailed || outputEventsBlocked ? "off" : pendingMode]
-    pendingMode = ""
-    pendingRetry = false
+    if (!pendingAction) return
+    if (actionFailed && !pendingAction.retry) { pendingAction = null; return }
+    if (actionProc.running) return
+    if (pendingAction.retry) actionFailed = false
+    actionProc.result = ""
+    actionProc.command = [root.helper, "set", lightingBlocked ? "off" : pendingAction.mode]
+    pendingAction = null
     actionProc.running = true
   }
 
   function updateSession(blocked) {
-    blocked = blocked || eventsFailed || outputEventsBlocked
+    blocked = blocked || eventsBlocked
     var wasBlocked = sessionBlocked
     sessionBlocked = blocked
     if (blocked) {
       lastSchedulePeriod = ""
       if (!wasBlocked) setMode("off", true)
-      else if (level > 0 || pendingMode !== "") setMode("off")
+      else if (level > 0 || pendingAction) setMode("off")
     } else {
       // An event at the deadline must apply an overdue transition before
       // stopping the old timer and arming tomorrow's deadline.
@@ -88,8 +90,7 @@ BarWidget {
     refreshPending = false
     lastSchedulePeriod = ""
     scheduleTimer.stop()
-    pendingMode = ""
-    pendingRetry = false
+    pendingAction = null
     setMode("off", true)
     console.warn("Keyboard backlight event subscription stopped; automatic lighting disabled until reload")
   }
@@ -101,21 +102,20 @@ BarWidget {
       scheduleTimer.stop()
       // A newer explicit request (including a fresh lock) gets its own one
       // attempt, even when the older in-flight command failed.
-      if (pendingRetry) flushMode()
+      if (pendingAction && pendingAction.retry) flushMode()
       else {
-        pendingMode = ""
+        pendingAction = null
         console.warn("Keyboard backlight write failed; waiting for a new lock, manual retry, or reload")
       }
       return
     }
-    if (actionResult === "inhibited") {
+    if (actionProc.result === "inhibited") {
       lastSchedulePeriod = ""
       sessionBlocked = true
       scheduleTimer.stop()
       // The guard already switched the hardware off. Discard stale requests,
       // then settle once; repeated guard failures must not form a retry loop.
-      pendingMode = ""
-      pendingRetry = false
+      pendingAction = null
       if (!guardRecoveryAttempted && !eventsFailed) {
         guardRecoveryAttempted = true
         refreshDelay.start()
@@ -151,52 +151,21 @@ BarWidget {
     }
   }
 
-  function schedulePeriod() {
-    var hour = new Date().getHours()
-    var night = nightStartHour
-    var day = dayStartHour
-    if (night === day) return "night"
-    if (night > day) return (hour >= night || hour < day) ? "night" : "day"
-    return (hour >= night && hour < day) ? "night" : "day"
-  }
-
   function applySchedule(force) {
-    if (sessionBlocked || eventsFailed || outputEventsBlocked) {
+    if (lightingBlocked || !scheduleEnabled) {
       lastSchedulePeriod = ""
       return
     }
-    if (!scheduleEnabled) {
-      lastSchedulePeriod = ""
-      return
-    }
-    var period = schedulePeriod()
+    var period = Schedule.period(new Date(), nightStartHour, dayStartHour)
     if (!force && period === lastSchedulePeriod) return
     lastSchedulePeriod = period
     setMode(period === "night" ? "low" : "off")
   }
 
-  function nextScheduleDelay(now) {
-    // Equal hours mean permanent night mode, so there is no next transition.
-    if (!scheduleEnabled || nightStartHour === dayStartHour) return 0
-    var next = Infinity
-    var hours = [nightStartHour, dayStartHour]
-    for (var i = 0; i < hours.length; i++) {
-      var boundary = new Date(now.getTime())
-      boundary.setHours(hours[i], 0, 0, 0)
-      if (boundary.getTime() <= now.getTime()) {
-        boundary = new Date(now.getTime())
-        boundary.setDate(boundary.getDate() + 1)
-        boundary.setHours(hours[i], 0, 0, 0)
-      }
-      next = Math.min(next, boundary.getTime() - now.getTime())
-    }
-    return next
-  }
-
   function armSchedule() {
     scheduleTimer.stop()
-    if (sessionBlocked || eventsFailed || outputEventsBlocked || actionFailed) return
-    var delay = nextScheduleDelay(new Date())
+    if (lightingBlocked || actionFailed) return
+    var delay = Schedule.nextDelay(new Date(), scheduleEnabled, nightStartHour, dayStartHour)
     if (delay <= 0) return
     scheduleTimer.interval = delay
     scheduleTimer.start()
@@ -304,9 +273,10 @@ BarWidget {
 
   Process {
     id: actionProc
+    property string result: ""
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.actionResult = text.trim()
+      onStreamFinished: actionProc.result = text.trim()
     }
     onExited: function(exitCode, exitStatus) { root.finishAction(exitCode, exitStatus) }
   }

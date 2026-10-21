@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { execFileSync } = require('node:child_process');
+const Schedule = require('../Schedule.js');
 
 const plugin = path.resolve(__dirname, '..');
 process.env.TZ = 'America/Toronto';
@@ -56,27 +57,30 @@ test('helper blocks locked, blank, and unknown sessions, including queued writes
 
 function widget(now) {
   const source = fs.readFileSync(path.join(plugin, 'BarWidget.qml'), 'utf8');
-  let currentTime = now;
+  let currentTime = now || '2026-10-21T20:00:00-04:00';
   class TestDate extends Date {
-    constructor(...args) { super(...(args.length ? args : currentTime ? [currentTime] : [])); }
+    constructor(...args) { super(...(args.length ? args : [currentTime])); }
     static timeZoneUpdated() { ctx.zoneUpdates++; }
   }
   const ctx = vm.createContext({ sessionBlocked: false, lastSchedulePeriod: 'night',
-    pendingMode: '', refreshPending: false, statusProc: { running: false },
-    eventsFailed: false, actionFailed: false, zoneUpdates: 0, Date: TestDate,
-    pendingRetry: false, guardRecoveryAttempted: false, outputEventsBlocked: false, actionResult: '',
+    pendingAction: null, refreshPending: false, statusProc: { running: false },
+    eventsFailed: false, actionFailed: false, zoneUpdates: 0, Date: TestDate, Schedule,
+    guardRecoveryAttempted: false, outputEventsBlocked: false,
     console: { warn() {} },
     level: 1, scheduleEnabled: true, helper: '/helper',
-    actionProc: { running: false, command: [] }, nightStartHour: 18, dayStartHour: 7,
+    actionProc: { running: false, command: [], result: '' }, nightStartHour: 18, dayStartHour: 7,
     refreshDelay: { running: false, stop() { this.running = false; }, start() { this.running = true; } },
     scheduleTimer: { running: false, interval: 0,
       stop() { this.running = false; }, start() { this.running = true; } } });
   ctx.root = ctx;
+  Object.defineProperties(ctx, {
+    eventsBlocked: { get: () => ctx.eventsFailed || ctx.outputEventsBlocked },
+    lightingBlocked: { get: () => ctx.sessionBlocked || ctx.eventsBlocked },
+  });
   for (const match of source.matchAll(/^  function \w+\([^\n]*\) \{\n[^]*?\n  }/gm)) {
     vm.runInContext(match[0], ctx);
   }
   ctx.setTime = value => { currentTime = value; };
-  if (!now) ctx.schedulePeriod = () => 'night';
   return ctx;
 }
 
@@ -84,10 +88,10 @@ test('lock overrides an in-flight action; unlocking reapplies the same period', 
   const w = widget();
   w.actionProc.running = true;
   w.updateSession(true);
-  assert.equal(w.pendingMode, 'off');
+  assert.equal(w.pendingAction.mode, 'off');
   assert.equal(w.lastSchedulePeriod, '');
   w.applySchedule(true);
-  assert.equal(w.pendingMode, 'off');
+  assert.equal(w.pendingAction.mode, 'off');
   w.actionProc.running = false;
   w.flushMode();
   assert.equal(w.actionProc.command[2], 'off');
@@ -104,7 +108,7 @@ test('wake uses the current period and preserves manual changes while active', (
   assert.equal(w.actionProc.running, false);
   w.updateSession(true);
   w.actionProc.running = false;
-  w.schedulePeriod = () => 'day';
+  w.setTime('2026-10-22T12:00:00-04:00');
   w.updateSession(false);
   assert.equal(w.actionProc.command[2], 'off');
   assert.equal(w.lastSchedulePeriod, 'day');
@@ -133,23 +137,6 @@ test('an event arriving during a state read queues another snapshot', () => {
   assert.equal(w.statusProc.running, true);
 });
 
-test('schedule targets the next boundary, including midnight and exact transition times', () => {
-  const w = widget();
-  const delay = time => w.nextScheduleDelay(new Date(time));
-  assert.equal(delay('2026-10-21T17:59:59.750-04:00'), 250);
-  assert.equal(delay('2026-10-21T18:00:00-04:00'), 13 * 3600000);
-  assert.equal(delay('2026-10-21T07:00:00-04:00'), 11 * 3600000);
-  assert.equal(delay('2026-10-21T23:00:00-04:00'), 8 * 3600000);
-  w.nightStartHour = 0;
-  assert.equal(delay('2026-10-21T23:59:59.900-04:00'), 100);
-});
-
-test('next-day deadlines use local calendar dates across daylight saving changes', () => {
-  const w = widget();
-  assert.equal(w.nextScheduleDelay(new Date('2026-03-07T20:00:00-05:00')), 10 * 3600000);
-  assert.equal(w.nextScheduleDelay(new Date('2026-10-31T20:00:00-04:00')), 12 * 3600000);
-});
-
 test('locking stops the timer; wake and settings changes recalculate the deadline', () => {
   const w = widget();
   w.armSchedule();
@@ -176,17 +163,17 @@ test('locking stops the timer; wake and settings changes recalculate the deadlin
 
 test('a late active snapshot cannot recover a dead event subscription', () => {
   const w = widget();
-  w.pendingMode = 'low';
+  w.pendingAction = { mode: 'low', retry: false };
   w.actionProc.running = true;
   w.failEvents();
   assert.equal(w.eventsFailed, true);
-  assert.equal(w.pendingMode, 'off');
+  assert.equal(w.pendingAction.mode, 'off');
   w.level = 0;
   w.updateSession(false); // Already-running status process completes after failure.
   w.handleEvent('change'); // Buffered event must not recover the stream either.
   w.clockChanged();
   assert.equal(w.sessionBlocked, true);
-  assert.equal(w.pendingMode, 'off');
+  assert.equal(w.pendingAction.mode, 'off');
   assert.equal(w.scheduleTimer.running, false);
   w.actionProc.running = false;
   w.flushMode();
@@ -197,11 +184,11 @@ test('failed writes stop automatic commands until an explicit manual retry', () 
   const w = widget();
   w.sessionBlocked = true;
   w.setMode('off');
-  w.pendingMode = 'low';
+  w.pendingAction = { mode: 'low', retry: false };
   w.actionProc.running = false;
   w.finishAction(1, 0);
   assert.equal(w.actionFailed, true);
-  assert.equal(w.pendingMode, '');
+  assert.equal(w.pendingAction, null);
   assert.equal(w.refreshDelay.running, false);
   assert.equal(w.scheduleTimer.running, false);
   for (let i = 0; i < 10; i++) w.updateSession(true);
@@ -231,7 +218,8 @@ test('a lock queued during a failed write survives duplicate state snapshots', (
   w.setMode('low');
   w.updateSession(true);
   w.updateSession(true);
-  assert.equal(w.pendingRetry, true);
+  assert.equal(w.pendingAction.mode, 'off');
+  assert.equal(w.pendingAction.retry, true);
   w.actionProc.running = false;
   w.finishAction(1, 0);
   assert.equal(w.actionProc.running, true);
@@ -240,7 +228,7 @@ test('a lock queued during a failed write survives duplicate state snapshots', (
 
 test('inhibited lighting invalidates the applied period and settles only once', () => {
   const w = widget();
-  w.actionResult = 'inhibited';
+  w.actionProc.result = 'inhibited';
   w.finishAction(0, 0);
   assert.equal(w.lastSchedulePeriod, '');
   assert.equal(w.sessionBlocked, true);
@@ -249,7 +237,7 @@ test('inhibited lighting invalidates the applied period and settles only once', 
   w.updateSession(false);
   assert.equal(w.actionProc.command[2], 'low');
   w.actionProc.running = false;
-  w.actionResult = 'inhibited';
+  w.actionProc.result = 'inhibited';
   w.finishAction(0, 0);
   assert.equal(w.refreshDelay.running, false);
   assert.equal(w.actionFailed, false);

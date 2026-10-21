@@ -15,7 +15,7 @@ function runWidget(status, action, watcher, setup) {
     for (const name of ['Ui', 'Commons']) fs.symlinkSync(path.join(omarchy, name), path.join(root, name));
     const copy = path.join(root, 'plugin');
     fs.mkdirSync(path.join(copy, 'bin'), { recursive: true });
-    for (const name of ['BarWidget.qml', 'Panel.qml']) fs.copyFileSync(path.join(plugin, name), path.join(copy, name));
+    for (const name of ['BarWidget.qml', 'Panel.qml', 'Schedule.js']) fs.copyFileSync(path.join(plugin, name), path.join(copy, name));
     const log = path.join(root, 'actions');
     fs.writeFileSync(log, '');
     const options = setup ? setup(root, log) : {};
