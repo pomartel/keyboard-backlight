@@ -12,6 +12,8 @@ BarWidget {
   property int maximum: 2
   property string deviceName: ""
   property string lastSchedulePeriod: ""
+  property bool sessionBlocked: true
+  property string pendingMode: ""
   readonly property string levelIcon: level <= 0 ? "󰹐" : (level >= maximum ? "󰛨" : "󰌶")
   readonly property bool scheduleEnabled: setting("scheduleEnabled", false) === true
   readonly property int nightStartHour: Number(setting("nightStartHour", 20))
@@ -24,9 +26,26 @@ BarWidget {
   }
 
   function setMode(mode) {
-    if (actionProc.running) return
-    actionProc.command = [root.helper, "set", mode]
+    pendingMode = sessionBlocked ? "off" : mode
+    flushMode()
+  }
+
+  function flushMode() {
+    if (actionProc.running || pendingMode === "") return
+    actionProc.command = [root.helper, "set", sessionBlocked ? "off" : pendingMode]
+    pendingMode = ""
     actionProc.running = true
+  }
+
+  function updateSession(blocked) {
+    var wasBlocked = sessionBlocked
+    sessionBlocked = blocked
+    if (blocked) {
+      lastSchedulePeriod = ""
+      if (!wasBlocked || level > 0 || pendingMode !== "") setMode("off")
+    } else if (wasBlocked) {
+      applySchedule(true)
+    }
   }
 
   function cycle() {
@@ -45,6 +64,10 @@ BarWidget {
   }
 
   function applySchedule(force) {
+    if (sessionBlocked) {
+      lastSchedulePeriod = ""
+      return
+    }
     if (!scheduleEnabled) {
       lastSchedulePeriod = ""
       return
@@ -112,7 +135,7 @@ BarWidget {
     onLoaded: { root.injectPanel(); Qt.callLater(root.injectPanel) }
   }
 
-  Timer { interval: 5000; running: true; repeat: true; onTriggered: root.refresh() }
+  Timer { interval: 1000; running: true; repeat: true; onTriggered: root.refresh() }
   Timer { interval: 30000; running: true; repeat: true; onTriggered: root.applySchedule(false) }
   Timer { id: scheduleDelay; interval: 1000; repeat: false; onTriggered: root.applySchedule(true) }
 
@@ -123,16 +146,26 @@ BarWidget {
       waitForEnd: true
       onStreamFinished: {
         var values = text.trim().split(/\s+/)
-        if (values.length >= 3) {
+        if (values.length === 4 && (values[3] === "true" || values[3] === "false")) {
           root.level = Number(values[0]) || 0
           root.maximum = Number(values[1]) || 2
-          root.deviceName = values.slice(2).join(" ")
-        }
+          root.deviceName = values[2]
+          root.updateSession(values[3] === "true")
+        } else root.updateSession(true)
       }
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0 || exitStatus !== 0) root.updateSession(true)
     }
   }
 
-  Process { id: actionProc; onExited: refreshDelay.start() }
+  Process {
+    id: actionProc
+    onExited: {
+      root.flushMode()
+      refreshDelay.start()
+    }
+  }
   Timer { id: refreshDelay; interval: 150; repeat: false; onTriggered: root.refresh() }
 
   BarIconButton {

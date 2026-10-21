@@ -17,17 +17,36 @@ fi
 current=$(brightnessctl -d "$device" get)
 maximum=$(brightnessctl -d "$device" max)
 
+# Treat an unavailable session state as inactive. logind's LockedHint does not
+# reflect Omarchy's native lock, so use its public IPC query instead.
+session_blocked() {
+  local locked monitors
+  locked=$(timeout 2s omarchy-shell lock isLocked 2>/dev/null) || return 0
+  [[ $locked == false ]] || return 0
+  monitors=$(timeout 2s hyprctl -j monitors 2>/dev/null) || return 0
+  jq -e 'type == "array" and any(.[]; .disabled != true and .dpmsStatus == true)' \
+    <<<"$monitors" >/dev/null 2>&1 || return 0
+  return 1
+}
+
 case ${1:-status} in
   status)
-    printf '%s %s %s\n' "$current" "$maximum" "$device"
+    blocked=false
+    if session_blocked; then blocked=true; fi
+    printf '%s %s %s %s\n' "$current" "$maximum" "$device" "$blocked"
     ;;
   set)
     case ${2:-} in
       off) target=0 ;;
       low) target=1 ;;
       high) target=$maximum ;;
-      *) echo "Usage: ${0##*/} [status|set {off|low|high}]" >&2; exit 2 ;;
+      *)
+        echo "Usage: ${0##*/} [status|set {off|low|high}]" >&2
+        exit 2
+        ;;
     esac
+    # Recheck at the write, too: a queued schedule action may outlive a lock.
+    if ((target > 0)) && session_blocked; then target=0; fi
     brightnessctl -d "$device" set "$target" >/dev/null
     ;;
   *)

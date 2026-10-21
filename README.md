@@ -8,13 +8,22 @@ An Omarchy shell plugin for ThinkPad keyboard backlights.
 - Optional day/night scheduling continues while the icon is hidden.
 - Detects compatible Linux `*kbd_backlight*` LED devices automatically.
 
-The plugin polls every five seconds. Use your keyboard backlight key to turn
+The plugin polls every second. Use your keyboard backlight key to turn
 lighting on manually while the icon is hidden, or let the schedule turn it on.
+
+Locking the session or turning off all enabled displays forces the keyboard
+backlight off, even with scheduling disabled. Detection normally takes up to
+one second. The backlight stays off if session state cannot be read. With
+multiple monitors, one awake display is sufficient while the session is unlocked.
+When unlocked with a display awake again, the current schedule is reapplied,
+including when the scheduled hour passed while locked. With scheduling disabled,
+the backlight remains off until you turn it on manually.
 
 ## Install
 
 Requires Omarchy with shell plugin support, `brightnessctl`, and a compatible
-keyboard backlight device.
+keyboard backlight device. Session detection uses `omarchy-shell`, `hyprctl`,
+`jq`, and `timeout` (included with Omarchy).
 
 ```bash
 omarchy plugin add https://github.com/pomartel/keyboard-backlight.git --enable --yes
@@ -32,6 +41,11 @@ omarchy bar set keyboard-backlight scheduleEnabled true --json
 omarchy bar set keyboard-backlight nightStartHour 18 --json
 omarchy bar set keyboard-backlight dayStartHour 7 --json
 ```
+
+## Tests
+
+Run `node --test tests/session.test.cjs` for session detection, guarded writes,
+and lock/wake scheduling regression tests. The tests do not change hardware state.
 
 ## Credits
 
