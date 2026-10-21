@@ -14,6 +14,7 @@ BarWidget {
   property string lastSchedulePeriod: ""
   property bool sessionBlocked: true
   property string pendingMode: ""
+  property bool refreshPending: false
   readonly property string levelIcon: level <= 0 ? "󰹐" : (level >= maximum ? "󰛨" : "󰌶")
   readonly property bool scheduleEnabled: setting("scheduleEnabled", false) === true
   readonly property int nightStartHour: Number(setting("nightStartHour", 20))
@@ -22,7 +23,11 @@ BarWidget {
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
 
   function refresh() {
-    if (!statusProc.running) statusProc.running = true
+    if (statusProc.running) refreshPending = true
+    else {
+      refreshPending = false
+      statusProc.running = true
+    }
   }
 
   function setMode(mode) {
@@ -116,14 +121,13 @@ BarWidget {
     target.hostWidget = root
   }
 
-  // Keep polling and scheduling alive while the icon is hidden.
+  // Keep event subscriptions and scheduling alive while the icon is hidden.
   visible: level > 0
   implicitWidth: level > 0 ? button.implicitWidth : 0
   implicitHeight: level > 0 ? button.implicitHeight : 0
   onBarChanged: injectPanel()
   onScheduleEnabledChanged: if (!scheduleEnabled) lastSchedulePeriod = ""
   Component.onCompleted: {
-    refresh()
     scheduleDelay.start()
   }
 
@@ -135,9 +139,22 @@ BarWidget {
     onLoaded: { root.injectPanel(); Qt.callLater(root.injectPanel) }
   }
 
-  Timer { interval: 1000; running: true; repeat: true; onTriggered: root.refresh() }
   Timer { interval: 30000; running: true; repeat: true; onTriggered: root.applySchedule(false) }
   Timer { id: scheduleDelay; interval: 1000; repeat: false; onTriggered: root.applySchedule(true) }
+
+  Process {
+    id: eventProc
+    command: [Qt.resolvedUrl("bin/watch-session").toString().replace(/^file:\/\//, "")]
+    running: true
+    stdout: SplitParser {
+      onRead: function(line) { if (line === "change") root.refresh() }
+    }
+    onExited: {
+      root.updateSession(true)
+      root.setMode("off")
+      console.warn("Keyboard backlight event subscription stopped; keeping backlight off")
+    }
+  }
 
   Process {
     id: statusProc
@@ -156,6 +173,7 @@ BarWidget {
     }
     onExited: function(exitCode, exitStatus) {
       if (exitCode !== 0 || exitStatus !== 0) root.updateSession(true)
+      if (root.refreshPending) Qt.callLater(root.refresh)
     }
   }
 

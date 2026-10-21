@@ -1,0 +1,27 @@
+#!/bin/bash
+set -euo pipefail
+
+plugin_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+source_file="$plugin_dir/src/watch-session.c"
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/keyboard-backlight"
+version=$(sha256sum "$source_file")
+binary="$cache_dir/watch-session-${version%% *}"
+
+if [[ ! -x $binary ]]; then
+  mkdir -p "$cache_dir"
+  temporary=$(mktemp "$cache_dir/.build-XXXXXX")
+  trap 'rm -f "$temporary"' EXIT
+  read -r -a build_flags <<<"$(pkg-config --cflags --libs wayland-client libsystemd)"
+  cc -std=c11 -D_GNU_SOURCE -O2 -Wall -Wextra -Werror "$source_file" "${build_flags[@]}" -o "$temporary"
+  chmod 755 "$temporary"
+  mv -f "$temporary" "$binary"
+fi
+
+led_file=""
+for candidate in /sys/class/leds/*kbd_backlight*/brightness_hw_changed; do
+  if [[ -e $candidate ]]; then
+    led_file=$candidate
+    break
+  fi
+done
+exec "$binary" "$led_file"

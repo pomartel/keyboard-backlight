@@ -56,10 +56,11 @@ test('helper blocks locked, blank, and unknown sessions, including queued writes
 function widget() {
   const source = fs.readFileSync(path.join(plugin, 'BarWidget.qml'), 'utf8');
   const ctx = vm.createContext({ sessionBlocked: false, lastSchedulePeriod: 'night',
-    pendingMode: '', level: 1, scheduleEnabled: true, helper: '/helper',
+    pendingMode: '', refreshPending: false, statusProc: { running: false },
+    level: 1, scheduleEnabled: true, helper: '/helper',
     actionProc: { running: false, command: [] }, nightStartHour: 18, dayStartHour: 7 });
   ctx.root = ctx;
-  for (const name of ['setMode', 'flushMode', 'updateSession', 'schedulePeriod', 'applySchedule']) {
+  for (const name of ['refresh', 'setMode', 'flushMode', 'updateSession', 'schedulePeriod', 'applySchedule']) {
     const match = source.match(new RegExp(`  function ${name}\\([^]*?\\n  }`));
     assert.ok(match, name);
     vm.runInContext(match[0], ctx);
@@ -106,4 +107,45 @@ test('disabled schedule still enforces off, without restoring brightness on wake
   w.actionProc.running = false;
   w.updateSession(false);
   assert.equal(w.actionProc.running, false);
+});
+
+test('an event arriving during a state read queues another snapshot', () => {
+  const w = widget();
+  w.refresh();
+  assert.equal(w.statusProc.running, true);
+  assert.equal(w.refreshPending, false);
+  w.refresh();
+  assert.equal(w.refreshPending, true);
+  w.statusProc.running = false;
+  w.refresh();
+  assert.equal(w.refreshPending, false);
+  assert.equal(w.statusProc.running, true);
+});
+
+test('native lock listener ignores authentication chatter and unrelated logs', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keyboard-backlight-native-'));
+  try {
+    const source = `
+      #define main watcher_main
+      #include ${JSON.stringify(path.join(plugin, 'src/watch-session.c'))}
+      #undef main
+      #include <assert.h>
+      int main(void) {
+        assert(lock_event("qml: omarchy lock 2026-10-21T12:00:00Z lock-requested"));
+        assert(lock_event("qml: omarchy lock now session-locked=false"));
+        assert(lock_event("qml: omarchy lock now secure=true"));
+        assert(lock_event("qml: omarchy lock now unlocked"));
+        assert(!lock_event("qml: omarchy lock now fingerprint-match"));
+        assert(!lock_event("qml: omarchy lock now password-failed"));
+        assert(!lock_event("other plugin: secure=true"));
+        return 0;
+      }
+    `;
+    const binary = path.join(dir, 'test');
+    execFileSync('cc', ['-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror',
+      '-x', 'c', '-', '-lwayland-client', '-lsystemd', '-o', binary], { input: source });
+    execFileSync(binary);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

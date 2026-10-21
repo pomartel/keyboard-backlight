@@ -8,13 +8,17 @@ An Omarchy shell plugin for ThinkPad keyboard backlights.
 - Optional day/night scheduling continues while the icon is hidden.
 - Detects compatible Linux `*kbd_backlight*` LED devices automatically.
 
-The plugin polls every second. Use your keyboard backlight key to turn
-lighting on manually while the icon is hidden, or let the schedule turn it on.
+The plugin waits for events instead of polling session or display state.
+It subscribes to Wayland output-power notifications, Omarchy's lock-state
+journal messages, and the kernel's keyboard LED notifications (when available).
+Use your keyboard backlight key to turn lighting on manually while the icon
+is hidden, or let the schedule turn it on.
 
 Locking the session or turning off all enabled displays forces the keyboard
-backlight off, even with scheduling disabled. Detection normally takes up to
-one second. The backlight stays off if session state cannot be read. With
-multiple monitors, one awake display is sufficient while the session is unlocked.
+backlight off, even with scheduling disabled. The backlight stays off if session
+state cannot be read or the event subscription exits. There is no polling
+fallback or automatic retry. With multiple monitors, one awake display is
+sufficient while the session is unlocked.
 When unlocked with a display awake again, the current schedule is reapplied,
 including when the scheduled hour passed while locked. With scheduling disabled,
 the backlight remains off until you turn it on manually.
@@ -24,12 +28,20 @@ the backlight remains off until you turn it on manually.
 Requires Omarchy with shell plugin support, `brightnessctl`, and a compatible
 keyboard backlight device. Session detection uses `omarchy-shell`, `hyprctl`,
 `jq`, and `timeout` (included with Omarchy).
+The event subscriber requires the Wayland output-power protocol, access to the
+current user's journal, and `cc`, `pkg-config`, `wayland`, and `systemd` to build
+its small native helper. On first use (and after its source changes), the helper
+is compiled once into `~/.cache/keyboard-backlight/`.
 
 ```bash
 omarchy plugin add https://github.com/pomartel/keyboard-backlight.git --enable --yes
 ```
 
 The plugin can also be dragged into the collapsible tray.
+
+Lock notifications currently follow the native Omarchy lock's `lock-requested`,
+`session-locked`, `secure`, and `unlocked` journal messages. Other lockers are not
+supported. The journal listener filters out authentication and fingerprint chatter.
 
 ## Schedule
 
@@ -41,6 +53,10 @@ omarchy bar set keyboard-backlight scheduleEnabled true --json
 omarchy bar set keyboard-backlight nightStartHour 18 --json
 omarchy bar set keyboard-backlight dayStartHour 7 --json
 ```
+
+The schedule still checks the clock every 30 seconds; this does not query the
+session or displays. Session state is read once when subscribing, then only in
+response to events or just before an explicit lighting action.
 
 ## Tests
 
